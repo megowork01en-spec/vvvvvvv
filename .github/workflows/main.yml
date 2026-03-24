@@ -37,6 +37,10 @@ jobs:
         run: |
           pip install requests bs4 "moviepy==1.0.3" "pillow==10.2.0" g4f edge-tts tqdm nest_asyncio -q
           
+          # تحميل صورة الشعار (Logo) لوضعها فوق الفيديو
+          # يمكنك تغيير الرابط أدناه برابط صورتك الخاصة (يفضل أن تكون PNG شفافة)
+          curl -sL "https://g.top4top.io/p_37351wbss1.png" -o logo.png
+
           cat << 'EOF' > script.py
           # ==========================================
           # استدعاء جميع المكتبات
@@ -54,7 +58,7 @@ jobs:
               PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
           # -----------------------------------------------
 
-          from moviepy.editor import ImageClip, AudioFileClip
+          from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip
           from datetime import datetime, timedelta
 
           # ==========================================
@@ -67,6 +71,13 @@ jobs:
           os.environ["SDL_VIDEODRIVER"] = "dummy"
 
           HISTORY_FILE = "shows_history.txt"
+          
+          # --- إعدادات الصورة الإضافية (الشعار) ---
+          OVERLAY_IMAGE_PATH = "logo.png" # اسم الملف الذي تم تحميله في خطوة الـ run
+          # التحكم في الحجم: نسبة مئوية من ارتفاع الفيديو (مثلاً 0.1 تعني 10% من الارتفاع)
+          LOGO_HEIGHT_RATIO = 0.08 
+          # التحكم في المكان: الهامش السفلي بالبكسل
+          LOGO_BOTTOM_MARGIN = 20 
 
           # ==========================================
           # دوال إنشاء الفيديو الجديدة
@@ -187,12 +198,49 @@ jobs:
                   final_video_name = "out.mp4"
                   try:
                       aud = AudioFileClip("v.mp3")
-                      vid = ImageClip("p.jpg").set_duration(aud.duration).set_audio(aud).set_fps(24)
-                      vid = vid.resize(height=720) 
-                      vid.write_videofile(final_video_name, codec="libx264", audio_codec="aac", temp_audiofile='temp-audio.m4a', remove_temp=True, verbose=False, logger=None)
-                      aud.close(); vid.close()
+                      # تجهيز الخلفية
+                      bg_vid = ImageClip("p.jpg").set_duration(aud.duration).set_fps(24)
+                      bg_vid = bg_vid.resize(height=720) 
+                      
+                      video_width, video_height = bg_vid.size
+                      
+                      # إضافة الصورة الإضافية (الشعار) إذا وجدت
+                      if os.path.exists(OVERLAY_IMAGE_PATH):
+                          logo = ImageClip(OVERLAY_IMAGE_PATH).set_duration(aud.duration)
+                          
+                          # تغيير الحجم بناءً على النسبة المحددة
+                          new_logo_height = int(video_height * LOGO_HEIGHT_RATIO)
+                          logo = logo.resize(height=new_logo_height)
+                          
+                          logo_width, logo_height = logo.size
+                          
+                          # حساب الإحداثيات لوضعها في أسفل الوسط
+                          # x: منتصف الشاشة - منتصف الشعار
+                          # y: الارتفاع الكامل - ارتفاع الشعار - الهامش السفلي
+                          pos_x = (video_width / 2) - (logo_width / 2)
+                          pos_y = video_height - logo_height - LOGO_BOTTOM_MARGIN
+                          
+                          logo = logo.set_position((pos_x, pos_y))
+                          
+                          # دمج الطبقات
+                          final_clip = CompositeVideoClip([bg_vid, logo])
+                      else:
+                          pbar.write(f"⚠️ لم يتم العثور على صورة الشعار في {OVERLAY_IMAGE_PATH}، سيتم إنشاء الفيديو بدونه.")
+                          final_clip = bg_vid
+
+                      # إضافة الصوت وإخراج الملف
+                      final_clip = final_clip.set_audio(aud)
+                      final_clip.write_videofile(final_video_name, codec="libx264", audio_codec="aac", temp_audiofile='temp-audio.m4a', remove_temp=True, verbose=False, logger=None)
+                      
+                      aud.close(); bg_vid.close()
+                      if os.path.exists(OVERLAY_IMAGE_PATH): logo.close()
+                      final_clip.close()
+                      
                   except Exception as e:
                       pbar.write(f"Video Error: {e}")
+                      # محاولة إغلاق الملفات في حال الخطأ لتحرير الذاكرة
+                      try: aud.close(); bg_vid.close()
+                      except: pass
                       return None
                   pbar.update(1)
 
@@ -233,7 +281,7 @@ jobs:
                           if fb_token and fb_page_id:
                               # تحديد العنوان المكون من الكلمة الثابتة واسم المسلسل
                               fb_title = f"(هنا الكلمة الثابته) {video_title}"
-                              fb_description = f"ملخص ومراجعة مسلسل {video_title}"
+                              fb_description = f"https://t.me/s/megodrFB / شاهد المسلسل كامل من هنا / مسلسل {video_title} كامل ومدبلج بالعربي ومترجم"
                               
                               url = f"https://graph.facebook.com/v19.0/{fb_page_id}/videos"
                               payload = {
@@ -263,8 +311,9 @@ jobs:
               except Exception as e:
                   print(f"❌ حدث خطأ غير متوقع: {e}")
 
+              # تنظيف الملفات المؤقتة، مع الإبقاء على logo.png للدورة القادمة
               for f in os.listdir():
-                  if f.endswith((".mp3", ".wav", ".jpg", ".webp", ".mp4", ".m4a")) and f != "fallback.webp":
+                  if f.endswith((".mp3", ".wav", ".jpg", ".webp", ".mp4", ".m4a")) and f not in ["fallback.webp", OVERLAY_IMAGE_PATH]:
                       try: os.remove(f)
                       except: pass
 
