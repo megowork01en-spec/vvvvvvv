@@ -1,30 +1,293 @@
-name: Run Python Script
+name: Perpetual Dual
 
-# تحديد متى يتم تشغيل الأكشن (عند عمل Push)
-on: [push]
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: streaming-group
+  cancel-in-progress: true
 
 jobs:
-  build:
+  stream:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
 
     steps:
-      # 1. جلب الكود من المستودع
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      # 2. إعداد بيئة بايثون
-      - name: Set up Python
+      - name: 🧹 Delete Old Logs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 1
+
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
-      # 3. تثبيت المكتبات (اختياري - إذا كان لديك ملف requirements.txt)
-      - name: Install dependencies
+      - name: 🚀 Create and Run Script
+        env:
+          FACEBOOK_ACCESS_TOKEN: ${{ secrets.FACEBOOK_ACCESS_TOKEN }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
         run: |
-          python -m pip install --upgrade pip
-          # pip install -r requirements.txt
+          pip install requests bs4 "moviepy==1.0.3" "pillow==10.2.0" g4f edge-tts tqdm nest_asyncio -q
+          
+          cat << 'EOF' > script.py
+          # ==========================================
+          # استدعاء جميع المكتبات
+          # ==========================================
+          import os, asyncio, re, warnings, urllib3, requests, time, gc, json, random
+          import nest_asyncio
+          import g4f
+          import edge_tts
+          from bs4 import BeautifulSoup
+          from tqdm import tqdm
 
-      # 4. تشغيل كود البايثون
-      - name: Run script
+          # --- حل مشكلة PIL.Image.ANTIALIAS مع MoviePy ---
+          import PIL.Image
+          if not hasattr(PIL.Image, 'ANTIALIAS'):
+              PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+          # -----------------------------------------------
+
+          from moviepy.editor import ImageClip, AudioFileClip
+          from datetime import datetime, timedelta
+
+          # ==========================================
+          # إعدادات بيئة العمل
+          # ==========================================
+          nest_asyncio.apply()
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+          warnings.filterwarnings("ignore", category=UserWarning)
+          os.environ["IMAGEIO_FFMPEG_EXE"] = "ffmpeg"
+          os.environ["SDL_VIDEODRIVER"] = "dummy"
+
+          HISTORY_FILE = "shows_history.txt"
+
+          # ==========================================
+          # دوال إنشاء الفيديو الجديدة
+          # ==========================================
+          def get_data():
+              history_titles = []
+              if os.path.exists(HISTORY_FILE):
+                  with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                      for line in f:
+                          if "|" in line:
+                              history_titles.append(line.split("|")[0].strip())
+
+              base = "https://www.shorttv.live"
+              try:
+                  r = requests.get(f"{base}/ar", headers={"User-Agent": "Mozilla/5.0"}, verify=False, timeout=10)
+                  soup = BeautifulSoup(r.text, 'html.parser')
+                  
+                  links = soup.find_all('a', href=True)
+                  random.shuffle(links)
+
+                  for a in links:
+                      img = a.find('img')
+                      if not img: continue
+                      title = re.sub(r'[a-zA-Z]', '', img.get('alt', '')).strip()
+                      if len(title) < 5: continue
+                      
+                      if title in history_titles:
+                          continue 
+                      
+                      s_url = a['href'] if a['href'].startswith('http') else base + a['href']
+                      s_page = requests.get(s_url, verify=False, timeout=5)
+                      s_soup = BeautifulSoup(s_page.text, 'html.parser')
+                      meta = s_soup.find('meta', attrs={'name': 'description'})
+                      desc = meta.get('content', '') if meta else "قصة درامية مشوقة"
+                      
+                      i_url = img.get('src') or img.get('data-src')
+                      if i_url.startswith('//'): i_url = "https:" + i_url
+                      
+                      img_data = requests.get(i_url).content
+                      with open("p.jpg", "wb") as f: f.write(img_data)
+                      return {"title": title, "desc": desc}
+              except Exception as e:
+                  return None
+              
+              return None
+
+          async def make_audio(text):
+              clean_text = re.sub(r'[^\u0600-\u06FF\s،.]', '', text)
+              communicate = edge_tts.Communicate(clean_text, "ar-KW-NouraNeural", rate="+12%")
+              await communicate.save("v.mp3")
+
+          def create_story(t, d):
+              print(f"🔄 البدء في توليد القصة (Target: 70 - 100 words)...")
+              
+              prompt = (f"اكتب ملخصاً درامياً قصيراً جداً لقصة بعنوان {t} بناءً على الوصف: {d}. "
+                        f"يجب أن يكون باللغة العربية الفصحى، بأسلوب روائي مشوق. "
+                        f"طول النص يجب أن يكون بين 70 إلى 100 كلمة فقط بدقة. "
+                        f"لا تستخدم أرقام أو رموز، فقط نص مسترسل.")
+              
+              response = None
+              for attempt in range(5):
+                  try:
+                      response = g4f.ChatCompletion.create(
+                          model=g4f.models.gpt_4,
+                          messages=[{"role":"user", "content": prompt}]
+                      )
+                      if response and len(response.split()) >= 40:
+                          break
+                      time.sleep(2)
+                  except Exception as e:
+                      print(f"⚠️ محاولة فاشلة للتوليد (محاولة {attempt+1})...")
+                      time.sleep(5)
+              
+              if response:
+                  story = re.sub(r'[*#\-]', '', response).strip()
+                  words = story.split()
+                  if len(words) > 100:
+                      story = " ".join(words[:100]) # قص النص لضمان ألا يتجاوز 100 كلمة
+                  return story
+              else:
+                  return f"ملخص قصير من وحي الخيال لقصة مسلسل {t}. أحداث درامية مشوقة ومثيرة."
+
+          def upload_to_catbox(path):
+              try:
+                  url = "https://catbox.moe/user/api.php"
+                  data = {"reqtype": "fileupload"}
+                  with open(path, "rb") as f:
+                      files = {"fileToUpload": f}
+                      response = requests.post(url, data=data, files=files)
+                  return response.text.strip()
+              except: return "Error during upload"
+
+          async def start_video_creation():
+              with tqdm(total=5, desc="🚀 العمل جاري", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
+                  pbar.set_description("🔍 جلب البيانات")
+                  data = get_data()
+                  if not data: 
+                      pbar.write("❌ فشل في جلب البيانات، إما بسبب التكرار أو خطأ في الاتصال.")
+                      return None
+                  
+                  t = data['title']
+                  pbar.write(f"🎬 العنوان المستهدف: {t}")
+                  pbar.update(1)
+
+                  pbar.set_description("🤖 تأليف القصة القصيرة")
+                  ai_story = create_story(t, data['desc'])
+                  fixed_intro = f"أهلاً بكم. اليوم سنروي لكم حكاية ملخصة من مسلسلنا الشهير {t}. "
+                  final_story_text = fixed_intro + ai_story
+                  word_count = len(final_story_text.split())
+                  pbar.write(f"📖 الطول النهائي للقصة: {word_count} كلمة.")
+                  pbar.update(1)
+
+                  pbar.set_description("🎙️ توليد الصوت")
+                  await make_audio(final_story_text)
+                  pbar.update(1)
+
+                  pbar.set_description("🎬 مونتاج الفيديو")
+                  final_video_name = "out.mp4"
+                  try:
+                      aud = AudioFileClip("v.mp3")
+                      vid = ImageClip("p.jpg").set_duration(aud.duration).set_audio(aud).set_fps(24)
+                      vid = vid.resize(height=720) 
+                      vid.write_videofile(final_video_name, codec="libx264", audio_codec="aac", temp_audiofile='temp-audio.m4a', remove_temp=True, verbose=False, logger=None)
+                      aud.close(); vid.close()
+                  except Exception as e:
+                      pbar.write(f"Video Error: {e}")
+                      return None
+                  pbar.update(1)
+
+                  pbar.set_description("☁️ رفع الفيديو")
+                  link = upload_to_catbox(final_video_name)
+                  pbar.update(1)
+                  pbar.write(f"\n✅ تم الانتهاء بنجاح! الرابط: {link}")
+                  
+                  return t
+
+          # ==========================================
+          # حلقة التكرار اللانهائية لإنتاج الفيديوهات تباعاً
+          # ==========================================
+          SCRIPT_START_TIME = time.time()
+          MAX_RUNTIME_SECONDS = 4 * 60 * 60
+
+          while True:
+              if time.time() - SCRIPT_START_TIME > MAX_RUNTIME_SECONDS:
+                  print("\n" + "="*60)
+                  print("⏳ اكتملت 4 ساعات من العمل المستمر. سيتم إنهاء الجلسة الحالية وبدء جلسة جديدة...")
+                  print("="*60)
+                  break
+
+              print("\n" + "="*60)
+              print("🔄 بدء دورة جديدة لإنتاج فيديو...")
+              print("="*60)
+
+              try:
+                  loop = asyncio.get_event_loop()
+                  video_title = loop.run_until_complete(start_video_creation())
+
+                  if video_title and os.path.exists("out.mp4"):
+                      print("\n[6/6] 📤 جاري الرفع إلى فيسبوك (يرجى الانتظار حتى تكتمل العملية)...")
+                      try:
+                          fb_token = os.environ.get('FACEBOOK_ACCESS_TOKEN')
+                          fb_page_id = os.environ.get('FACEBOOK_PAGE_ID')
+                          
+                          if fb_token and fb_page_id:
+                              # تحديد العنوان المكون من الكلمة الثابتة واسم المسلسل
+                              fb_title = f"(هنا الكلمة الثابته) {video_title}"
+                              fb_description = f"ملخص ومراجعة مسلسل {video_title}"
+                              
+                              url = f"https://graph.facebook.com/v19.0/{fb_page_id}/videos"
+                              payload = {
+                                  'access_token': fb_token,
+                                  'title': fb_title,
+                                  'description': fb_description
+                              }
+                              with open('out.mp4', 'rb') as f:
+                                  files = {'source': f}
+                                  response = requests.post(url, data=payload, files=files)
+                              
+                              res_json = response.json()
+                              if 'id' in res_json:
+                                  print(f"✅ تم الرفع لفيسبوك بنجاح! معرف الفيديو: {res_json['id']}")
+                                  with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+                                      f.write(f"{video_title}|{datetime.now().strftime('%Y-%m-%d')}\n")
+                              else:
+                                  print(f"❌ فشل الرفع لفيسبوك: {res_json}")
+                          else:
+                              print("❌ أسرار فيسبوك (FACEBOOK_ACCESS_TOKEN أو FACEBOOK_PAGE_ID) غير متوفرة في بيئة العمل.")
+                              # نحفظه في التاريخ حتى لو فشل الرفع لتجنب التكرار
+                              with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+                                  f.write(f"{video_title}|{datetime.now().strftime('%Y-%m-%d')}\n")
+                      except Exception as e:
+                          print(f"❌ خطأ غير متوقع أثناء الرفع لفيسبوك: {e}")
+
+              except Exception as e:
+                  print(f"❌ حدث خطأ غير متوقع: {e}")
+
+              for f in os.listdir():
+                  if f.endswith((".mp3", ".wav", ".jpg", ".webp", ".mp4", ".m4a")) and f != "fallback.webp":
+                      try: os.remove(f)
+                      except: pass
+
+              print("\n" + "="*50)
+              print("✅ تم الانتهاء من الدورة الحالية!")
+              print("⏳ جاري الانتظار 60 ثانية قبل البدء في إنتاج الفيديو التالي...")
+              print("="*50)
+
+              time.sleep(60)
+          EOF
+          python script.py
+
+      - name: 💾 Commit History to Repository
         run: |
-          python -c "print('Hello from GitHub Actions!'); print('Python script executed successfully.')"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add shows_history.txt || true
+          git commit -m "📝 Update trends history" || true
+          git push || true
+
+      - name: ⏳ Workflow Persistence (Auto-restart)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "جاري إعادة تشغيل الأكشن لضمان العمل المستمر (Perpetual Dual)..."
+          gh workflow run "Perpetual Dual" --ref ${{ github.ref_name }}
