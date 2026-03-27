@@ -322,7 +322,7 @@ jobs:
               print("⏳ جاري الانتظار 60 ثانية قبل البدء في إنتاج الفيديو التالي...")
               print("="*50)
 
-              time.sleep(3000)
+              time.sleep(60)
           EOF
           python script.py
 
